@@ -1,0 +1,21 @@
+{% extends "layout.html" %}
+
+{% block title %}Invoice Recorded - Finance System{% endblock %}
+
+{% block content %}
+<div class="card" style="border-color: var(--accent-emerald); text-align: center; padding: 3rem 2rem;">
+    <div style="font-size: 3rem; margin-bottom: 1rem;">✅</div>
+    <h1 style="color: var(--accent-emerald); margin: 0 0 0.5rem 0;" data-testid="success-title">Invoice Recorded Successfully</h1>
+    <p style="color: var(--text-muted); font-size: 1.1rem;">The invoice has been stored in the finance database.</p>
+    
+    <div style="background-color: #090d16; border: 1px dashed var(--accent-emerald); border-radius: 8px; padding: 1.5rem; display: inline-block; margin: 2rem 0;">
+        <span style="color: var(--text-muted); font-size: 0.9rem; text-transform: uppercase; display: block; margin-bottom: 0.3rem;">System Record ID</span>
+        <strong style="font-size: 2.2rem; color: var(--accent-emerald);" data-testid="record-id">{{ record_id }}</strong>
+    </div>
+
+    <div>
+        <a href="/" class="btn">Record Another Invoice</a>
+        <a href="/records" class="btn" style="background-color: transparent; border: 1px solid var(--border-color); color: var(--text-main); margin-left: 10px;">View All Records</a>
+    </div>
+</div>
+{% endblock %}

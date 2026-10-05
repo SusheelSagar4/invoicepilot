@@ -1,0 +1,47 @@
+{% extends "layout.html" %}
+
+{% block title %}Vendor Search - Invoice Portal{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2 style="margin-top: 0;">Search Vendor Invoices</h2>
+    <p style="color: var(--text-muted);">Enter vendor name (e.g. Acme, Microsoft, Globex, Initech) to query invoices.</p>
+    
+    <form action="/search" method="get" style="display: flex; gap: 10px; margin-bottom: 2rem;">
+        <input type="text" name="q" value="{{ query if query else '' }}" placeholder="Enter vendor name..." class="input-text" data-testid="search-input" required>
+        <button type="submit" class="btn" data-testid="search-button">Search</button>
+    </form>
+
+    {% if query is not none %}
+        <h3>Search Results for "<span data-testid="search-query-display">{{ query }}</span>"</h3>
+        {% if results %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Invoice Number</th>
+                        <th>Vendor</th>
+                        <th>Issue Date</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for inv in results %}
+                    <tr data-testid="invoice-list-item">
+                        <td data-testid="invoice-number" style="font-weight: bold; color: var(--accent-blue);">{{ inv.invoice_number }}</td>
+                        <td data-testid="invoice-vendor">{{ inv.vendor }}</td>
+                        <td data-testid="invoice-issue-date">{{ inv.issue_date }}</td>
+                        <td>
+                            <a href="/invoice/{{ inv.invoice_number }}" class="link-item" data-testid="invoice-link-{{ inv.invoice_number }}">View Details &rarr;</a>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% else %}
+            <p style="color: var(--text-muted);" data-testid="no-results">No invoices found matching "{{ query }}".</p>
+        {% endif %}
+    {% else %}
+        <p style="color: var(--text-muted); font-style: italic;">Enter a search term above to display matching invoices.</p>
+    {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,36 @@
+{% extends "layout.html" %}
+
+{% block title %}Record Invoice - Finance System{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2 style="margin-top: 0;">Record Processed Invoice</h2>
+    <p style="color: var(--text-muted); margin-bottom: 2rem;">Enter invoice details to record payment authorization into the finance database.</p>
+    
+    <form action="/submit" method="post">
+        <div class="form-group">
+            <label for="invoice_number">Invoice Number</label>
+            <input type="text" id="invoice_number" name="invoice_number" class="input-text" placeholder="e.g. INV-2026-001" data-testid="input-invoice-number" required>
+        </div>
+
+        <div class="form-group">
+            <label for="vendor">Vendor Name</label>
+            <input type="text" id="vendor" name="vendor" class="input-text" placeholder="e.g. Acme Technologies" data-testid="input-vendor" required>
+        </div>
+
+        <div class="form-group">
+            <label for="amount">Amount (₹ / numerical)</label>
+            <input type="number" step="0.01" id="amount" name="amount" class="input-text" placeholder="e.g. 45200.00" data-testid="input-amount" required>
+        </div>
+
+        <div class="form-group">
+            <label for="due_date">Due Date</label>
+            <input type="date" id="due_date" name="due_date" class="input-text" data-testid="input-due-date" required>
+        </div>
+
+        <div style="margin-top: 2rem;">
+            <button type="submit" class="btn" data-testid="btn-submit">Submit Invoice Record</button>
+        </div>
+    </form>
+</div>
+{% endblock %}

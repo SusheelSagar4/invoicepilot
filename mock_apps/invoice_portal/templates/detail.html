@@ -1,0 +1,45 @@
+{% extends "layout.html" %}
+
+{% block title %}Invoice {{ invoice.invoice_number }} - Details{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 1rem; margin-bottom: 1.5rem;">
+        <div>
+            <span style="color: var(--text-muted); font-size: 0.9rem;">Invoice Reference</span>
+            <h1 style="margin: 0;" data-testid="invoice-detail-number">{{ invoice.invoice_number }}</h1>
+        </div>
+        <div>
+            <span class="status-badge {% if invoice.status == 'Paid' %}status-paid{% else %}status-unpaid{% endif %}" data-testid="invoice-detail-status">
+                {{ invoice.status }}
+            </span>
+        </div>
+    </div>
+
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;">
+        <div>
+            <label style="color: var(--text-muted); font-size: 0.85rem; text-transform: uppercase;">Vendor Name</label>
+            <p style="font-size: 1.2rem; font-weight: 600; margin: 0.2rem 0 1rem 0;" data-testid="invoice-detail-vendor">{{ invoice.vendor }}</p>
+        </div>
+
+        <div>
+            <label style="color: var(--text-muted); font-size: 0.85rem; text-transform: uppercase;">Issue Date</label>
+            <p style="font-size: 1.2rem; margin: 0.2rem 0 1rem 0;" data-testid="invoice-detail-issue-date">{{ invoice.issue_date }}</p>
+        </div>
+
+        <div>
+            <label style="color: var(--text-muted); font-size: 0.85rem; text-transform: uppercase;">Total Payable</label>
+            <p style="font-size: 1.5rem; font-weight: bold; color: var(--accent-blue); margin: 0.2rem 0 1rem 0;" data-testid="invoice-detail-total">{{ invoice.total_payable_str }}</p>
+        </div>
+
+        <div>
+            <label style="color: var(--text-muted); font-size: 0.85rem; text-transform: uppercase;">Payment Due Date</label>
+            <p style="font-size: 1.2rem; margin: 0.2rem 0 1rem 0;" data-testid="invoice-detail-due-date">{{ invoice.payment_due_str }}</p>
+        </div>
+    </div>
+
+    <div style="margin-top: 2rem; border-top: 1px solid var(--border-color); padding-top: 1.5rem;">
+        <a href="javascript:history.back()" class="btn" style="background-color: transparent; border: 1px solid var(--border-color); color: var(--text-main);">&larr; Back to Search</a>
+    </div>
+</div>
+{% endblock %}

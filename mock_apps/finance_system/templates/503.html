@@ -1,0 +1,11 @@
+{% extends "layout.html" %}
+
+{% block title %}503 Service Unavailable{% endblock %}
+
+{% block content %}
+<div class="card" style="border-color: var(--error-red); text-align: center; padding: 3rem;">
+    <h1 style="color: var(--error-red); font-size: 3rem; margin-bottom: 0.5rem;" data-testid="error-503-title">503 Service Unavailable</h1>
+    <p style="font-size: 1.2rem; color: var(--text-muted);" data-testid="error-503-message">Finance System is currently unavailable (Chaos Switch Active).</p>
+    <p style="color: var(--text-muted);">Submission failed. Try resetting the chaos switch via <code>GET /admin/reset</code>.</p>
+</div>
+{% endblock %}

@@ -1,0 +1,17 @@
+{% extends "layout.html" %}
+
+{% block title %}Duplicate Invoice - Finance System{% endblock %}
+
+{% block content %}
+<div class="card" style="border-color: var(--error-red); text-align: center; padding: 3rem 2rem;">
+    <div style="font-size: 3rem; margin-bottom: 1rem;">⚠️</div>
+    <h1 style="color: var(--error-red); margin: 0 0 0.5rem 0;" data-testid="error-duplicate">Duplicate invoice</h1>
+    <p style="color: var(--text-muted); font-size: 1.1rem; max-width: 500px; margin: 0 auto 2rem auto;">
+        An invoice with the number <strong style="color: var(--text-main);">{{ invoice_number }}</strong> has already been recorded in the finance system.
+    </p>
+
+    <div>
+        <a href="/" class="btn" style="background-color: var(--error-red); color: white;">Try Different Invoice</a>
+    </div>
+</div>
+{% endblock %}

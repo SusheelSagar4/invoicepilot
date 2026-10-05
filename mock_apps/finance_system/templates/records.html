@@ -1,0 +1,41 @@
+{% extends "layout.html" %}
+
+{% block title %}All Recorded Invoices - Finance System{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+        <h2 style="margin: 0;">Recorded Invoices Log</h2>
+        <a href="/" class="btn">+ Record New</a>
+    </div>
+
+    {% if records %}
+    <table data-testid="records-table">
+        <thead>
+            <tr>
+                <th>Record ID</th>
+                <th>Invoice Number</th>
+                <th>Vendor</th>
+                <th>Amount (₹)</th>
+                <th>Due Date</th>
+                <th>Recorded At</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for rec in records %}
+            <tr data-testid="record-row-{{ rec.record_id }}">
+                <td style="font-weight: bold; color: var(--accent-emerald);" data-testid="record-row-id">{{ rec.record_id }}</td>
+                <td data-testid="record-row-number">{{ rec.invoice_number }}</td>
+                <td data-testid="record-row-vendor">{{ rec.vendor }}</td>
+                <td data-testid="record-row-amount">₹{{ rec.amount }}</td>
+                <td data-testid="record-row-due-date">{{ rec.due_date }}</td>
+                <td style="color: var(--text-muted); font-size: 0.85rem;" data-testid="record-row-created-at">{{ rec.created_at }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p style="color: var(--text-muted); font-style: italic;" data-testid="no-records">No invoices recorded in the finance system yet.</p>
+    {% endif %}
+</div>
+{% endblock %}
