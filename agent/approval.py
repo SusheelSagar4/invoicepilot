@@ -36,24 +36,24 @@ class ApprovalGate:
         """
         Determine sensitivity from last read_page snapshot state.
 
-        Sensitivity Rules:
-        1. Tool is 'click' and element is unknown/missing from element_map -> sensitive (Fail-Closed).
-        2. Element is input of type submit, or label matches submit|record|save|confirm|pay|send|delete -> sensitive.
-        3. URL host:port is localhost:8002 (finance system) and element is a button -> sensitive.
-        4. Programmatic form submit tools (if any) -> sensitive.
+        Order of Sensitivity Rules:
+        1. Non-click tools -> NOT sensitive.
+        2. Unknown element ID (missing from snapshot) -> Sensitive (Fail-Closed).
+        3. Plain links (<a>) and plain text/number/date inputs -> NOT sensitive,
+           even if their label matches submit|record|save|... (e.g. 'Record Invoice' link).
+        4. Buttons (<button>), submit inputs (<input type="submit">), or sensitive label regex -> Sensitive.
 
         Returns:
             (sensitive: bool, label: str, elem_info: dict)
         """
         if tool_name != "click":
-            # Non-click tools (e.g. goto, type_text, read_page, remember) are not sensitive
             return False, "", {}
 
         element_id = tool_args.get("element_id")
         if element_id is None:
             return True, "unknown element (no ID)", {}
 
-        # Rule C: Unknown element ID in snapshot -> Sensitive (Fail-Closed)
+        # Rule 2: Unknown element ID in snapshot -> Sensitive (Fail-Closed)
         elem_info = element_map.get(int(element_id)) if element_map else None
         if not elem_info:
             return True, f"unknown element (ID {element_id} not in snapshot)", {}
@@ -61,16 +61,20 @@ class ApprovalGate:
         el_type = str(elem_info.get("type", "")).lower()
         el_label = str(elem_info.get("label", "")).strip()
 
-        # Rule A: Input of type submit OR label matches sensitive regex
-        is_submit_type = el_type == "input:submit" or el_type == "submit"
+        # Rule 3: Plain links (<a>) and plain text/number/date inputs are NOT sensitive
+        # (Overriding label regex for harmless navigation links like "Record Invoice" and text fields)
+        is_plain_link = el_type == "a"
+        is_plain_input = el_type in ["input:text", "input:number", "input:date", "input:email", "textarea"]
+
+        if is_plain_link or is_plain_input:
+            return False, el_label, elem_info
+
+        # Rule 4: Buttons, submit inputs, or sensitive label regex
+        is_button_or_submit = el_type == "button" or "submit" in el_type or el_type.startswith("input:")
         label_matches_sensitive = bool(SENSITIVE_LABEL_REGEX.search(el_label))
-
-        # Rule B: Current URL host:port is localhost:8002 and element is a button
         is_finance_url = "localhost:8002" in current_url or ":8002" in current_url
-        is_button = el_type == "button" or el_type.startswith("input:")
-        finance_button = is_finance_url and is_button
 
-        if is_submit_type or label_matches_sensitive or finance_button:
+        if is_button_or_submit or label_matches_sensitive or is_finance_url:
             return True, el_label, elem_info
 
         return False, el_label, elem_info

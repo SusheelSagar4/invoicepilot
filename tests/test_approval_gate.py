@@ -14,6 +14,7 @@ class TestApprovalGate(unittest.TestCase):
         self.element_map = {
             1: {"id": 1, "type": "input:text", "label": "Search box"},
             2: {"id": 2, "type": "button", "label": "Search"},
+            3: {"id": 3, "type": "a", "label": "Record Invoice", "href": "/record"},
             5: {"id": 5, "type": "button", "label": "Submit Invoice Record"}
         }
 
@@ -52,8 +53,8 @@ class TestApprovalGate(unittest.TestCase):
         mock_input.assert_called_once()
 
     @patch("builtins.input")
-    def test_search_click_localhost_8001_not_sensitive(self, mock_input):
-        """Test (c): Click on 'Search' on localhost:8001 does not prompt."""
+    def test_record_invoice_link_not_sensitive(self, mock_input):
+        """Test: Click on link 'Record Invoice' (<a>) does NOT prompt (not sensitive)."""
         gate = ApprovalGate(auto_approve=False)
         mock_browser = MagicMock()
         mock_browser.page.url = "http://localhost:8001/"
@@ -61,7 +62,7 @@ class TestApprovalGate(unittest.TestCase):
         approved, reason = gate.check_and_prompt(
             browser=mock_browser,
             tool_name="click",
-            tool_args={"element_id": 2},
+            tool_args={"element_id": 3},
             element_map=self.element_map
         )
         self.assertTrue(approved)

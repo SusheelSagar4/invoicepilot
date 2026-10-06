@@ -139,10 +139,10 @@ class BrowserTools:
                                 label = ariaLabel;
                             } else if (assocLabel) {
                                 label = assocLabel;
-                            } else if (phAttr) {
-                                label = phAttr;
                             } else if (nameAttr) {
                                 label = nameAttr;
+                            } else if (phAttr) {
+                                label = phAttr;
                             } else if (el.id) {
                                 label = el.id.trim();
                             } else {
