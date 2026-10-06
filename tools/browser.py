@@ -71,6 +71,27 @@ class BrowserTools:
                 // Remove existing agent tags
                 document.querySelectorAll('[data-agent-id]').forEach(el => el.removeAttribute('data-agent-id'));
                 
+                // Helper function to get text of an associated <label>
+                function getAssociatedLabelText(el) {
+                    let labelEl = null;
+                    if (el.id) {
+                        try {
+                            labelEl = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+                        } catch (e) {
+                            labelEl = document.querySelector(`label[for="${el.id}"]`);
+                        }
+                    }
+                    if (!labelEl) {
+                        labelEl = el.closest('label');
+                    }
+                    if (labelEl) {
+                        const clone = labelEl.cloneNode(true);
+                        clone.querySelectorAll('input, select, textarea, button').forEach(child => child.remove());
+                        return (clone.innerText || clone.textContent || '').trim();
+                    }
+                    return '';
+                }
+
                 // Find all potential interactive elements
                 const candidates = Array.from(document.querySelectorAll('a, button, input, select, textarea'));
                 let idCounter = 1;
@@ -87,29 +108,93 @@ class BrowserTools:
                         const elementId = idCounter++;
                         el.setAttribute('data-agent-id', elementId.toString());
                         
-                        // Classify element type
-                        let elType = el.tagName.toLowerCase();
-                        if (elType === 'input') {
+                        const tagName = el.tagName.toLowerCase();
+                        let elType = tagName;
+                        if (tagName === 'input') {
                             elType = `input:${el.type || 'text'}`;
                         }
                         
-                        // Extract label representation
-                        let label = (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('placeholder') || '').trim();
-                        if (!label && el.id) {
-                            const labelEl = document.querySelector(`label[for="${el.id}"]`);
-                            if (labelEl) label = labelEl.innerText.trim();
-                        }
-                        if (!label && el.closest('label')) {
-                            label = el.closest('label').innerText.trim();
-                        }
-                        if (!label) {
-                            label = el.name || el.id || 'unlabeled';
+                        let label = '';
+                        let href = null;
+                        let placeholder = null;
+                        let value = null;
+                        let options = null;
+
+                        if (tagName === 'a') {
+                            label = (el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim();
+                            if (!label && el.id) label = el.id;
+                            if (!label) label = 'unlabeled';
+                            const rawHref = el.getAttribute('href');
+                            if (rawHref && rawHref.trim() !== '') {
+                                href = rawHref.trim();
+                            }
+                        } else if (tagName === 'input' || tagName === 'textarea') {
+                            // Priority: aria-label -> associated <label> -> placeholder -> name -> id -> unlabeled
+                            const ariaLabel = (el.getAttribute('aria-label') || '').trim();
+                            const assocLabel = getAssociatedLabelText(el);
+                            const phAttr = (el.getAttribute('placeholder') || '').trim();
+                            const nameAttr = (el.name || el.getAttribute('name') || '').trim();
+
+                            if (ariaLabel) {
+                                label = ariaLabel;
+                            } else if (assocLabel) {
+                                label = assocLabel;
+                            } else if (phAttr) {
+                                label = phAttr;
+                            } else if (nameAttr) {
+                                label = nameAttr;
+                            } else if (el.id) {
+                                label = el.id.trim();
+                            } else {
+                                label = 'unlabeled';
+                            }
+
+                            if (phAttr) {
+                                placeholder = phAttr;
+                            }
+
+                            if (el.value !== undefined && el.value !== null && el.value.trim() !== '') {
+                                value = el.value.trim();
+                            }
+                        } else if (tagName === 'button') {
+                            label = (el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || '').trim();
+                            if (!label && el.id) label = el.id;
+                            if (!label) label = 'unlabeled';
+                        } else if (tagName === 'select') {
+                            const ariaLabel = (el.getAttribute('aria-label') || '').trim();
+                            const assocLabel = getAssociatedLabelText(el);
+                            const nameAttr = (el.name || el.getAttribute('name') || '').trim();
+
+                            if (ariaLabel) {
+                                label = ariaLabel;
+                            } else if (assocLabel) {
+                                label = assocLabel;
+                            } else if (nameAttr) {
+                                label = nameAttr;
+                            } else if (el.id) {
+                                label = el.id.trim();
+                            } else {
+                                label = 'unlabeled';
+                            }
+
+                            const optList = Array.from(el.options).map(o => (o.text || o.textContent || '').trim()).filter(Boolean);
+                            if (optList.length > 0) {
+                                options = optList;
+                            }
+
+                            if (el.value !== undefined && el.value !== null && el.value.trim() !== '') {
+                                value = el.value.trim();
+                            }
                         }
                         
                         elements.push({
                             id: elementId,
                             type: elType,
-                            label: label
+                            label: label,
+                            href: href || undefined,
+                            placeholder: placeholder || undefined,
+                            value: value || undefined,
+                            options: options || undefined
                         });
                     }
                 });
@@ -127,7 +212,20 @@ class BrowserTools:
             data = self.page.evaluate(js_script)
             
             # Format elements list as human/LLM readable text
-            elem_lines = [f"[{el['id']}] {el['type']} \"{el['label']}\"" for el in data["elements"]]
+            elem_lines = []
+            for el in data["elements"]:
+                line = f"[{el['id']}] {el['type']} \"{el['label']}\""
+                if el.get("href"):
+                    line += f" (href: {el['href']})"
+                if el.get("placeholder"):
+                    line += f" (placeholder: {el['placeholder']})"
+                if el.get("options"):
+                    opts_str = ", ".join(el["options"])
+                    line += f" (options: {opts_str})"
+                if el.get("value"):
+                    line += f" (value: {el['value']})"
+                elem_lines.append(line)
+
             elem_str = "\n".join(elem_lines) if elem_lines else "(No interactive elements found)"
             
             observation = (

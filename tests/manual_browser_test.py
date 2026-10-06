@@ -83,10 +83,10 @@ def main():
         print_step("9. Read Finance Form", r9)
 
         # Step 10: Fill Form Fields
-        inv_input_id = find_element_id(r9, "INV-2026-001")
-        vendor_input_id = find_element_id(r9, "Acme Technologies")
-        amount_input_id = find_element_id(r9, "45200")
-        date_input_id = find_element_id(r9, "input:date")
+        inv_input_id = find_element_id(r9, "Invoice Number")
+        vendor_input_id = find_element_id(r9, "Vendor Name")
+        amount_input_id = find_element_id(r9, "Amount")
+        date_input_id = find_element_id(r9, "Due Date")
 
         browser.type_text(inv_input_id, "INV-2026-003")
         browser.type_text(vendor_input_id, "Acme Technologies")
