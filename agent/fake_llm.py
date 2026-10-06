@@ -11,6 +11,45 @@ from typing import List, Dict, Any, Optional, Tuple
 from agent.llm import DecisionResult
 
 
+def parse_snapshot_elements(obs_text: str) -> List[Dict[str, Any]]:
+    """
+    Parse all tagged elements from a read_page observation snapshot string.
+    Returns list of dicts: [{'id': int, 'type': str, 'label': str, 'href': str, 'raw': str}]
+    """
+    parsed = []
+    for line in obs_text.splitlines():
+        line = line.strip()
+        if line.startswith("[") and "]" in line:
+            try:
+                id_part, rest = line.split("]", 1)
+                elem_id = int(id_part.replace("[", "").strip())
+                rest = rest.strip()
+                
+                # Split first token as type (e.g. 'button' or 'input:text' or 'a')
+                tokens = rest.split(None, 1)
+                el_type = tokens[0] if tokens else ""
+                remainder = tokens[1] if len(tokens) > 1 else ""
+                
+                # Extract label inside quotes if present
+                label_match = re.search(r'"([^"]*)"', remainder)
+                label = label_match.group(1) if label_match else remainder
+
+                # Extract href if present
+                href_match = re.search(r'\(href:\s*([^)]+)\)', remainder)
+                href = href_match.group(1).strip() if href_match else ""
+
+                parsed.append({
+                    "id": elem_id,
+                    "type": el_type,
+                    "label": label,
+                    "href": href,
+                    "raw": line
+                })
+            except Exception:
+                continue
+    return parsed
+
+
 def find_element(
     obs_text: str,
     type_prefix: Optional[str] = None,
@@ -21,34 +60,38 @@ def find_element(
     Dynamically find an element_id from read_page observation text by matching element type,
     label, or href substring.
     """
-    for line in obs_text.splitlines():
-        line = line.strip()
-        if line.startswith("[") and "]" in line:
-            try:
-                id_part, rest = line.split("]", 1)
-                elem_id = int(id_part.replace("[", "").strip())
-                
-                type_match = True
-                if type_prefix:
-                    first_token = rest.split()[0].lower() if rest.split() else ""
-                    type_match = type_prefix.lower() in first_token
-                
-                label_match = True
-                if label_substring:
-                    label_match = label_substring.lower() in rest.lower()
-                
-                href_match = True
-                if href_substring:
-                    href_match = href_substring.lower() in rest.lower()
-                
-                if type_match and label_match and href_match:
-                    return elem_id
-            except Exception:
-                continue
+    elements = parse_snapshot_elements(obs_text)
 
+    for el in elements:
+        type_match = True
+        if type_prefix:
+            t = el["type"].lower()
+            tp = type_prefix.lower()
+            if tp == "button":
+                type_match = (t == "button" or "button" in t or "submit" in t)
+            else:
+                type_match = tp in t
+
+        label_match = True
+        if label_substring:
+            label_match = label_substring.lower() in el["label"].lower() or label_substring.lower() in el["raw"].lower()
+
+        href_match = True
+        if href_substring:
+            href_match = href_substring.lower() in el["href"].lower() or href_substring.lower() in el["raw"].lower()
+
+        if type_match and label_match and href_match:
+            return el["id"]
+
+    # Print debugging context on lookup failure
+    print(f"\n[fake_llm] Lookup FAILED for type='{type_prefix}', label='{label_substring}', href='{href_substring}'")
+    print("Parsed Elements in latest snapshot:")
+    for el in elements:
+        print(f"  [{el['id']}] type={el['type']} label='{el['label']}' href='{el['href']}'")
+
+    parsed_summary = [f"[{e['id']}] {e['type']} \"{e['label']}\"" for e in elements]
     raise ValueError(
-        f"Could not find element matching type='{type_prefix}', label='{label_substring}', href='{href_substring}' "
-        f"in observation snapshot."
+        f"Could not find element type={type_prefix} label={label_substring} href={href_substring} in: {parsed_summary}"
     )
 
 
@@ -63,7 +106,7 @@ def parse_date_to_dt(date_str: str) -> datetime:
         return datetime.strptime(clean_str, "%Y-%m-%d")
     except ValueError:
         pass
-    # Try %d %B %Y
+    # Try %d %B %Y (e.g., 15 September 2026)
     try:
         return datetime.strptime(clean_str, "%d %B %Y")
     except ValueError:
@@ -80,15 +123,15 @@ class FakeLLM:
     def __init__(self):
         self.step_state = 0
         self.parsed_facts: Dict[str, str] = {}
-        self.latest_invoice_href: Optional[str] = None
 
-    def _get_latest_observation(self, messages: List[Dict[str, str]]) -> str:
-        """Extract latest observation text from messages list."""
+    def _get_latest_page_snapshot(self, messages: List[Dict[str, str]]) -> str:
+        """
+        Scan message history backwards specifically for the most recent read_page observation snapshot.
+        """
         for msg in reversed(messages):
-            if msg.get("role") == "user" and "Tool '" in msg.get("content", ""):
-                return msg["content"]
-            if msg.get("role") == "user" and "Page Text:" in msg.get("content", ""):
-                return msg["content"]
+            content = msg.get("content", "")
+            if "Interactive Elements:" in content or "Page Text:" in content:
+                return content
         return ""
 
     def decide(
@@ -100,7 +143,7 @@ class FakeLLM:
         """
         Dynamically execute scripted steps based on observation snapshots.
         """
-        obs = self._get_latest_observation(messages)
+        obs = self._get_latest_page_snapshot(messages)
         self.step_state += 1
 
         # Step 1: Navigate to Portal
@@ -111,12 +154,12 @@ class FakeLLM:
         if self.step_state == 2:
             return DecisionResult(is_tool_call=True, tool_name="read_page", tool_args={})
 
-        # Step 3: Type "acme" into Search Box (dynamically located by type and label/placeholder)
+        # Step 3: Type "acme" into Search Box (dynamically located)
         if self.step_state == 3:
             inp_id = find_element(obs, type_prefix="input", label_substring="vendor")
             return DecisionResult(is_tool_call=True, tool_name="type_text", tool_args={"element_id": inp_id, "text": "acme"})
 
-        # Step 4: Click Search Button (dynamically located)
+        # Step 4: Click Search Button (dynamically located from step 2 snapshot)
         if self.step_state == 4:
             btn_id = find_element(obs, type_prefix="button", label_substring="Search")
             return DecisionResult(is_tool_call=True, tool_name="click", tool_args={"element_id": btn_id})
@@ -127,10 +170,7 @@ class FakeLLM:
 
         # Step 6: Parse Search Results Table & Click Link for Latest Invoice from "Acme Technologies"
         if self.step_state == 6:
-            # Parse search results table rows matching exact vendor "Acme Technologies"
-            # Format in page text: INV-2026-001 | Acme Technologies | 2026-08-15 (or 15 August 2026)
-            rows = []
-            # Match pattern: (INV-\d+-\d+)\s+([^\n|]+)\s+([\d-a-zA-Z\s]+)
+            # Match pattern: (INV-\d+-\d+)\s+([^\n|]+?)\s+([\d]{4}-\d{2}-\d{2}|\d{1,2}\s+[A-Za-z]+\s+\d{4})
             matches = re.findall(r"(INV-\d+-\d+)\s+([^\n|]+?)\s+([\d]{4}-\d{2}-\d{2}|\d{1,2}\s+[A-Za-z]+\s+\d{4})", obs)
             
             candidates = []
@@ -140,19 +180,17 @@ class FakeLLM:
                     candidates.append((issue_dt, inv_num))
 
             if not candidates:
-                # Fallback: search links in snapshot directly for Acme
                 for line in obs.splitlines():
                     if "/invoice/INV-" in line:
                         inv_match = re.search(r"/invoice/(INV-\d+-\d+)", line)
                         if inv_match:
                             candidates.append((datetime.min, inv_match.group(1)))
 
-            # Sort candidates by issue date descending to select the latest invoice
+            # Sort candidates by issue date descending to select latest invoice
             candidates.sort(key=lambda x: x[0], reverse=True)
             target_inv_num = candidates[0][1] if candidates else "INV-2026-003"
-            self.latest_invoice_href = f"/invoice/{target_inv_num}"
 
-            # Dynamically locate link by href substring or target invoice number
+            # Dynamically locate link by href substring
             link_id = find_element(obs, type_prefix="a", href_substring=target_inv_num)
             return DecisionResult(is_tool_call=True, tool_name="click", tool_args={"element_id": link_id})
 
@@ -162,7 +200,6 @@ class FakeLLM:
 
         # Step 8-11: Dynamic Parsing of Detail Page Text & Remember Facts
         if self.step_state in [8, 9, 10, 11]:
-            # Parse values directly from detail page text
             inv_match = re.search(r"INV-\d{4}-\d{3}", obs)
             parsed_inv = inv_match.group(0) if inv_match else "INV-2026-003"
 
@@ -173,7 +210,7 @@ class FakeLLM:
             else:
                 parsed_amt = "62400"
 
-            # Parse Payment Due Date (convert human date like "30 October 2026" or ISO "2026-10-30" to YYYY-MM-DD)
+            # Parse Payment Due Date (convert human date or ISO date to ISO YYYY-MM-DD)
             due_match = re.search(r"(?:Payment Due Date|Due Date|Due)\s*[:\n]?\s*(\d{4}-\d{2}-\d{2}|\d{1,2}\s+[A-Za-z]+\s+\d{4})", obs, re.IGNORECASE)
             if due_match:
                 raw_due = due_match.group(1).strip()

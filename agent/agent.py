@@ -245,12 +245,21 @@ class Agent:
                         )
                 except llm.LLMUnavailableError as e:
                     run_status = "LLM_UNAVAILABLE"
+                    final_summary = f"LLM unavailable: {str(e)}"
                     print(f"\nStopped: LLM unavailable after retries ({str(e)})")
+                    break
+                except Exception as e:
+                    run_status = "DECISION_ERROR"
+                    exc_type = type(e).__name__
+                    exc_msg = str(e)
+                    final_summary = f"Decision error at step {step} [{exc_type}]: {exc_msg}"
+                    print(f"\n[DECISION_ERROR] Step {step} decision source error ({exc_type}): {exc_msg}")
                     break
 
                 if decision.error:
                     print(f"LLM Error: {decision.error}")
-                    run_status = "LLM_UNAVAILABLE"
+                    run_status = "DECISION_ERROR"
+                    final_summary = f"Decision error at step {step}: {decision.error}"
                     break
 
                 # Handle Empty Response Fault
