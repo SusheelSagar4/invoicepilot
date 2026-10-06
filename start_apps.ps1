@@ -3,15 +3,18 @@
 
 Write-Host "Starting Invoice Portal (Port 8001) and Finance System (Port 8002)..."
 
+$portalLog = Join-Path $env:TEMP "uvicorn_portal.log"
+$financeLog = Join-Path $env:TEMP "uvicorn_finance.log"
+
 # Launch Invoice Portal on Port 8001 as background process
 $portalProc = Start-Process -FilePath ".venv\Scripts\python.exe" `
     -ArgumentList "-m uvicorn mock_apps.invoice_portal.app:app --host 127.0.0.1 --port 8001 --reload" `
-    -PassThru -WindowStyle Hidden -RedirectStandardOutput $null -RedirectStandardError $null
+    -PassThru -WindowStyle Hidden -RedirectStandardOutput $portalLog -RedirectStandardError $portalLog
 
 # Launch Finance System on Port 8002 as background process
 $financeProc = Start-Process -FilePath ".venv\Scripts\python.exe" `
     -ArgumentList "-m uvicorn mock_apps.finance_system.app:app --host 127.0.0.1 --port 8002 --reload" `
-    -PassThru -WindowStyle Hidden -RedirectStandardOutput $null -RedirectStandardError $null
+    -PassThru -WindowStyle Hidden -RedirectStandardOutput $financeLog -RedirectStandardError $financeLog
 
 # Wait 3 seconds for server initialization
 Start-Sleep -Seconds 3
