@@ -187,11 +187,20 @@ class BrowserTools:
                             }
                         }
                         
+                        let formMethod = null;
+                        if (tagName === 'button' || (tagName === 'input' && (el.type === 'submit' || el.type === 'button'))) {
+                            const formEl = el.closest('form');
+                            if (formEl) {
+                                formMethod = (formEl.getAttribute('method') || formEl.method || 'GET').toUpperCase();
+                            }
+                        }
+
                         elements.push({
                             id: elementId,
                             type: elType,
                             label: label,
                             href: href || undefined,
+                            form_method: formMethod || undefined,
                             placeholder: placeholder || undefined,
                             value: value || undefined,
                             options: options || undefined
@@ -217,6 +226,8 @@ class BrowserTools:
                 line = f"[{el['id']}] {el['type']} \"{el['label']}\""
                 if el.get("href"):
                     line += f" (href: {el['href']})"
+                if el.get("form_method"):
+                    line += f" (form: {el['form_method']})"
                 if el.get("placeholder"):
                     line += f" (placeholder: {el['placeholder']})"
                 if el.get("options"):

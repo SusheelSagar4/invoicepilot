@@ -9,6 +9,9 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 import os
+import re
+from datetime import datetime
+from typing import Optional
 from .seed_data import INVOICES
 
 app = FastAPI(title="Mock Invoice Portal")
@@ -99,3 +102,61 @@ async def reset_chaos():
     global fail_next_count
     fail_next_count = 0
     return {"status": "reset", "fail_next": 0}
+
+
+def _format_portal_invoice(inv: dict) -> dict:
+    """Helper to convert seed invoice dict into standardized API JSON format."""
+    raw_amt = inv.get("total_payable_str", "")
+    cleaned_amt = re.sub(r"[^\d.]", "", str(raw_amt))
+    amt_float = float(cleaned_amt) if cleaned_amt else 0.0
+
+    raw_due = inv.get("payment_due_str", "")
+    due_iso = raw_due
+    try:
+        dt = datetime.strptime(raw_due.strip(), "%d %B %Y")
+        due_iso = dt.strftime("%Y-%m-%d")
+    except ValueError:
+        try:
+            dt = datetime.strptime(raw_due.strip(), "%Y-%m-%d")
+            due_iso = dt.strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+
+    return {
+        "invoice_number": inv.get("invoice_number"),
+        "vendor": inv.get("vendor"),
+        "issue_date": inv.get("issue_date"),
+        "amount": amt_float,
+        "due_date": due_iso,
+        "status": inv.get("status")
+    }
+
+
+@app.get("/api/invoices/{invoice_number}")
+async def get_portal_invoice_api(invoice_number: str):
+    """
+    Independent API endpoint returning raw JSON for a single invoice.
+    Bypasses failure injection / chaos switch.
+    """
+    inv = next((i for i in INVOICES if i["invoice_number"].upper() == invoice_number.upper()), None)
+    if not inv:
+        return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content={"error": "Invoice not found"})
+    return _format_portal_invoice(inv)
+
+
+@app.get("/api/invoices")
+async def get_portal_invoices_api(vendor: Optional[str] = Query(None)):
+    """
+    Independent API endpoint returning list of portal invoices, optionally filtered by vendor.
+    Bypasses failure injection / chaos switch.
+    """
+    if not vendor:
+        return [_format_portal_invoice(i) for i in INVOICES]
+
+    vendor_str = vendor.strip().lower()
+    matched = [i for i in INVOICES if i["vendor"].lower() == vendor_str]
+    if not matched:
+        matched = [i for i in INVOICES if vendor_str in i["vendor"].lower()]
+
+    return [_format_portal_invoice(i) for i in matched]
+

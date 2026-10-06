@@ -62,19 +62,18 @@ class ApprovalGate:
         el_label = str(elem_info.get("label", "")).strip()
 
         # Rule 3: Plain links (<a>) and plain text/number/date inputs are NOT sensitive
-        # (Overriding label regex for harmless navigation links like "Record Invoice" and text fields)
-        is_plain_link = el_type == "a"
-        is_plain_input = el_type in ["input:text", "input:number", "input:date", "input:email", "textarea"]
+        is_plain_link = (el_type == "a")
+        is_plain_input = el_type in ["input:text", "input:number", "input:date", "input:email", "input:password", "textarea", "select"]
 
         if is_plain_link or is_plain_input:
             return False, el_label, elem_info
 
-        # Rule 4: Buttons, submit inputs, or sensitive label regex
-        is_button_or_submit = el_type == "button" or "submit" in el_type or el_type.startswith("input:")
+        # Rule 4: Buttons, submit inputs, or elements in POST forms or matching sensitive label regex
+        form_method = str(elem_info.get("form_method", "")).upper()
+        is_post_form = (form_method == "POST")
         label_matches_sensitive = bool(SENSITIVE_LABEL_REGEX.search(el_label))
-        is_finance_url = "localhost:8002" in current_url or ":8002" in current_url
 
-        if is_button_or_submit or label_matches_sensitive or is_finance_url:
+        if is_post_form or label_matches_sensitive:
             return True, el_label, elem_info
 
         return False, el_label, elem_info
