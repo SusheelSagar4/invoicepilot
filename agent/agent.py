@@ -2,7 +2,7 @@
 Agent Core Execution Loop for InvoicePilot.
 Manages the step-by-step reasoning cycle:
 1. Build prompt context (Task goal + Remembered facts + Trimmed interaction history)
-2. Obtain LLM decision via llm.decide()
+2. Obtain LLM decision via llm.decide() or FakeLLM
 3. Check sensitive action Approval Gate at single choke point
 4. Execute selected tool through ToolRegistry
 5. Gate finish tool via independent Verifier check
@@ -20,6 +20,7 @@ from agent.memory import Memory
 from agent.tool_registry import ToolRegistry
 from agent.prompts import build_system_prompt
 from agent.approval import ApprovalGate
+from agent.fake_llm import FakeLLM
 from agent import llm
 
 
@@ -35,6 +36,7 @@ class Agent:
         apps_config: List[Dict[str, str]],
         verifier_fn: Optional[Callable[[Dict[str, str]], Dict[str, Any]]] = None,
         auto_approve: bool = False,
+        use_fake_llm: bool = False,
         headless: bool = False,
         slow_mo: int = 300
     ):
@@ -44,6 +46,7 @@ class Agent:
         self.apps_config = apps_config
         self.verifier_fn = verifier_fn
         self.auto_approve = auto_approve
+        self.use_fake_llm = use_fake_llm
         self.headless = headless
         self.slow_mo = slow_mo
 
@@ -63,15 +66,18 @@ class Agent:
         print(f"\n==================== Starting Agent Loop ====================")
         print(f"Task: {task}")
         print(f"Max Steps: {max_steps}")
+        if self.use_fake_llm:
+            print("🧪 FAKE LLM MODE: Using scripted happy-path tool decisions (No API quota used)")
         if self.auto_approve:
             print("⚠️ WARNING: --auto-approve is ENABLED. All sensitive actions will execute without human confirmation!")
         print(f"============================================================\n")
 
-        # Initialize browser tools, memory, registry, and approval gate
+        # Initialize browser tools, memory, registry, approval gate, and fake LLM
         browser = BrowserTools(headless=self.headless, slow_mo=self.slow_mo)
         memory = Memory()
         registry = ToolRegistry()
         approval_gate = ApprovalGate(auto_approve=self.auto_approve)
+        fake_llm_instance = FakeLLM() if self.use_fake_llm else None
 
         # Map holding last read_page snapshot element metadata (element_id -> {type, label, href})
         last_snapshot_elements: Dict[int, Dict[str, Any]] = {}
@@ -81,6 +87,7 @@ class Agent:
         final_summary = ""
         run_status = "IN_PROGRESS"
         rejected_finish_attempts = 0
+        consecutive_empty_responses = 0
         tool_failures_count = 0
         human_approvals_count = 0
         verifier_result: Optional[Dict[str, Any]] = None
@@ -88,9 +95,7 @@ class Agent:
         def wrapped_read_page() -> Dict[str, Any]:
             nonlocal last_snapshot_elements
             res = browser.read_page()
-            # Extract and store elements map from DOM read_page result
             if res.get("ok") and "observation" in res:
-                # Re-parse or fetch elements array via internal evaluate for state map
                 try:
                     raw_data = browser.page.evaluate("""
                     () => {
@@ -110,7 +115,6 @@ class Agent:
         def finish_impl(summary: str) -> Dict[str, Any]:
             nonlocal finished, final_summary, run_status, rejected_finish_attempts, verifier_result
 
-            # Run independent verifier check if configured
             if self.verifier_fn:
                 v_res = self.verifier_fn(memory.facts)
                 verifier_result = v_res
@@ -198,8 +202,8 @@ class Agent:
         completed_steps = 0
 
         try:
-            for step in range(1, max_steps + 1):
-                completed_steps = step
+            step = 1
+            while step <= max_steps and not finished:
                 print(f"\n--- Step {step}/{max_steps} ---")
 
                 system_prompt = build_system_prompt(self.apps_config)
@@ -227,11 +231,18 @@ class Agent:
 
                 tool_schemas = registry.get_schemas()
                 try:
-                    decision = llm.decide(
-                        system_prompt=system_prompt,
-                        messages=messages,
-                        tools=tool_schemas
-                    )
+                    if self.use_fake_llm:
+                        decision = fake_llm_instance.decide(
+                            system_prompt=system_prompt,
+                            messages=messages,
+                            tools=tool_schemas
+                        )
+                    else:
+                        decision = llm.decide(
+                            system_prompt=system_prompt,
+                            messages=messages,
+                            tools=tool_schemas
+                        )
                 except llm.LLMUnavailableError as e:
                     run_status = "LLM_UNAVAILABLE"
                     print(f"\nStopped: LLM unavailable after retries ({str(e)})")
@@ -242,7 +253,28 @@ class Agent:
                     run_status = "LLM_UNAVAILABLE"
                     break
 
+                # Handle Empty Response Fault
+                if not decision.is_tool_call and (not decision.text or not decision.text.strip()):
+                    print("Model returned an empty response")
+                    consecutive_empty_responses += 1
+                    if consecutive_empty_responses >= 2:
+                        print("Model returned 2 consecutive empty responses. Terminating run.")
+                        run_status = "MODEL_NO_ACTION"
+                        final_summary = "Model returned 2 consecutive empty responses."
+                        break
+                    else:
+                        # Add short system nudge to history and retry step without counting empty response as a step
+                        history_steps.append({
+                            "role": "user",
+                            "content": "System Nudge: You must call exactly one tool step to make progress."
+                        })
+                        continue
+
+                # Reset consecutive empty response counter on valid decision
+                consecutive_empty_responses = 0
+
                 if decision.is_tool_call:
+                    completed_steps = step
                     tool_name = decision.tool_name
                     tool_args = decision.tool_args
                     print(f"Action: {tool_name}({tool_args})")
@@ -266,6 +298,7 @@ class Agent:
                         history_steps.append({"role": "model", "content": f"Selected tool '{tool_name}' with args {tool_args}", "tool": tool_name})
                         history_steps.append({"role": "user", "content": f"Tool '{tool_name}' result:\nHuman rejected this action", "tool": tool_name})
                         print(f"Result (ok=False): Human rejected this action")
+                        step += 1
                         continue
                     elif "Human approved" in app_reason or "Auto-approved" in app_reason:
                         human_approvals_count += 1
@@ -276,8 +309,9 @@ class Agent:
                         tool_failures_count += 1
 
                     obs_str = result.get("observation", "")
-                    short_obs = obs_str.replace("\n", " ")[:120]
-                    print(f"Result (ok={result.get('ok')}): {short_obs}...")
+                    # Print first 300 characters of the result
+                    short_obs = obs_str.replace("\n", " ")[:300]
+                    print(f"Result (ok={result.get('ok')}): {short_obs}")
 
                     memory.log_action(tool_name, tool_args, result)
                     history_steps.append({"role": "model", "content": f"Selected tool '{tool_name}' with args {tool_args}", "tool": tool_name})
@@ -286,14 +320,24 @@ class Agent:
                     if finished:
                         break
                 else:
+                    completed_steps = step
                     text = decision.text or ""
                     print(f"Model Thought: {text}")
                     history_steps.append({"role": "model", "content": text})
 
-            if not finished and run_status not in ["LLM_UNAVAILABLE", "FAILED_VERIFICATION"]:
+                step += 1
+
+            if not finished and run_status not in ["LLM_UNAVAILABLE", "FAILED_VERIFICATION", "MODEL_NO_ACTION"]:
                 run_status = "MAX_STEPS"
                 final_summary = f"Reached maximum steps ({max_steps}) without completion."
 
+            if self.verifier_fn and not verifier_result:
+                verifier_result = self.verifier_fn(memory.facts)
+
+        except KeyboardInterrupt:
+            run_status = "INTERRUPTED"
+            final_summary = "Run interrupted by user (KeyboardInterrupt)."
+            print("\nRun interrupted by user (KeyboardInterrupt).")
             if self.verifier_fn and not verifier_result:
                 verifier_result = self.verifier_fn(memory.facts)
 

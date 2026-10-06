@@ -45,6 +45,7 @@ def main():
     parser = argparse.ArgumentParser(description="InvoicePilot Autonomous AI Browser Agent")
     parser.add_argument("task", nargs="?", default=DEFAULT_TASK, help="Task instruction string for the agent")
     parser.add_argument("--auto-approve", action="store_true", default=False, help="Skip terminal approval prompts for sensitive actions")
+    parser.add_argument("--fake-llm", action="store_true", default=False, help="Use scripted FakeLLM for testing without spending API quota")
     parser.add_argument("--max-steps", type=int, default=25, help="Maximum number of loop steps allowed")
 
     args = parser.parse_args()
@@ -54,6 +55,8 @@ def main():
         task = DEFAULT_TASK
 
     print(f"Task Instruction: {task}")
+    if args.fake_llm:
+        print("Mode: FAKE LLM (Scripted happy-path decisions, zero API quota used)")
     if args.auto_approve:
         print("⚠️ WARNING: --auto-approve is ENABLED. All sensitive actions will execute without human confirmation!")
     else:
@@ -67,6 +70,7 @@ def main():
         apps_config=APPS_CONFIG,
         verifier_fn=verifier_fn,
         auto_approve=args.auto_approve,
+        use_fake_llm=args.fake_llm,
         headless=False,
         slow_mo=300
     )

@@ -9,7 +9,7 @@ import re
 import time
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -41,7 +41,7 @@ _client = genai.Client(api_key=API_KEY)
 
 
 class LLMUnavailableError(Exception):
-    """Raised when the LLM provider remains unavailable after maximum rate-limit retries."""
+    """Raised when the LLM provider remains unavailable after rate-limit retries or daily quota depletion."""
     pass
 
 
@@ -71,39 +71,49 @@ def _enforce_min_delay():
     _last_call_timestamp = time.time()
 
 
-def _extract_retry_delay(err: Exception) -> int:
+def _parse_retry_delay_and_quota(err: Exception) -> Tuple[float, str]:
     """
-    Extract suggested retry delay in seconds from Gemini API error payload/details.
-    Defaults to 60 seconds if not specified.
+    Extract float retry delay (seconds) and quotaId string from Gemini API error details/message.
+    Handles values like '57s', '58.3s', and '60.0'.
     """
     err_str = str(err)
-    match = re.search(r"['\"]?retryDelay['\"]?\s*:\s*['\"]?(\d+)s?['\"]?", err_str, re.IGNORECASE)
-    if match:
-        return int(match.group(1))
     
+    # Extract quotaId string (e.g., quotaId: "GenerateRequestsPerDayPerProject")
+    quota_match = re.search(r"['\"]?quotaId['\"]?\s*:\s*['\"]?([^'\"]+)['\"]?", err_str, re.IGNORECASE)
+    quota_id = quota_match.group(1).strip() if quota_match else "UnknownQuota"
+
+    # Extract retryDelay float (e.g., '57s' or '58.3s')
+    delay_match = re.search(r"['\"]?retryDelay['\"]?\s*:\s*['\"]?([\d.]+)s?['\"]?", err_str, re.IGNORECASE)
+    retry_delay = 60.0
+    if delay_match:
+        try:
+            retry_delay = float(delay_match.group(1))
+        except ValueError:
+            retry_delay = 60.0
+
+    # Also inspect error.details if available
     details = getattr(err, "details", None)
     if details and isinstance(details, (list, tuple)):
         for d in details:
-            if isinstance(d, dict) and "retryDelay" in d:
-                delay_str = str(d["retryDelay"]).rstrip("s")
-                if delay_str.isdigit():
-                    return int(delay_str)
+            if isinstance(d, dict):
+                if "quotaId" in d:
+                    quota_id = str(d["quotaId"]).strip()
+                if "retryDelay" in d:
+                    d_str = str(d["retryDelay"]).rstrip("s")
+                    try:
+                        retry_delay = float(d_str)
+                    except ValueError:
+                        pass
 
-    return 60
+    return retry_delay, quota_id
 
 
 def ask(prompt: str) -> str:
     """
     Sends a plain text prompt to the Gemini LLM and returns the generated text response.
-    Respects MIN_SECONDS_BETWEEN_CALLS and retries on 429 quota errors.
-
-    Args:
-        prompt: Plain text prompt string.
-
-    Returns:
-        Generated text reply from the model as a string.
+    Enforces rate-limiting and quota checking up to 3 retries.
     """
-    max_retries = 5
+    max_retries = 3
     for attempt in range(max_retries):
         _enforce_min_delay()
         try:
@@ -115,11 +125,22 @@ def ask(prompt: str) -> str:
         except Exception as e:
             err_msg = str(e)
             is_rate_limit = "429" in err_msg or "quota" in err_msg.lower() or "resource_exhausted" in err_msg.lower()
-            if is_rate_limit and attempt < max_retries - 1:
-                suggested_delay = _extract_retry_delay(e)
-                wait_time = suggested_delay + 1
-                print(f"Rate limited, waiting {wait_time}s...")
-                time.sleep(wait_time)
+            if is_rate_limit:
+                parsed_delay, quota_id = _parse_retry_delay_and_quota(e)
+                print(f"Rate limited (Quota: {quota_id}, Delay: {parsed_delay:.1f}s)")
+                
+                # Check for PerDay quota or long wait times (> 120s)
+                if "perday" in quota_id.lower() or parsed_delay > 120.0:
+                    raise LLMUnavailableError(
+                        f"Daily or long-term quota limit hit ({quota_id}). Requested delay is {parsed_delay:.1f}s. Resets later."
+                    )
+                
+                if attempt < max_retries - 1:
+                    wait_time = min(parsed_delay, 90.0) + 1.0
+                    print(f"Rate limited, waiting {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                else:
+                    raise LLMUnavailableError(f"LLM ask() failed after {max_retries} retries ({quota_id}).")
             else:
                 raise LLMUnavailableError(f"LLM ask() failed: {err_msg}")
 
@@ -133,11 +154,8 @@ def decide(
 ) -> DecisionResult:
     """
     Function-calling entry point for the agent loop.
-    Sends conversation history and registered tool schemas to Gemini,
-    returning a structured DecisionResult with a tool call or text response.
-
-    Enforces MIN_SECONDS_BETWEEN_CALLS and handles 429 rate limits up to 5 retries.
-    Raises LLMUnavailableError if all retries fail.
+    Sends conversation history and registered tool schemas to Gemini.
+    Enforces float delay parsing, PerDay quota circuit breaking, and up to 3 retries.
     """
     func_declarations = []
     for tool_schema in tools:
@@ -167,7 +185,7 @@ def decide(
             )
         )
 
-    max_retries = 5
+    max_retries = 3
     for attempt in range(max_retries):
         _enforce_min_delay()
         try:
@@ -196,13 +214,21 @@ def decide(
             err_msg = str(e)
             is_rate_limit = "429" in err_msg or "quota" in err_msg.lower() or "resource_exhausted" in err_msg.lower()
             if is_rate_limit:
+                parsed_delay, quota_id = _parse_retry_delay_and_quota(e)
+                print(f"Rate limited (Quota: {quota_id}, Delay: {parsed_delay:.1f}s)")
+                
+                # Check for PerDay quota or long wait times (> 120s)
+                if "perday" in quota_id.lower() or parsed_delay > 120.0:
+                    raise LLMUnavailableError(
+                        f"Daily or long-term quota limit hit ({quota_id}). Requested delay is {parsed_delay:.1f}s. Resets later."
+                    )
+
                 if attempt < max_retries - 1:
-                    suggested_delay = _extract_retry_delay(e)
-                    wait_time = suggested_delay + 1
-                    print(f"Rate limited, waiting {wait_time}s...")
+                    wait_time = min(parsed_delay, 90.0) + 1.0
+                    print(f"Rate limited, waiting {wait_time:.1f}s...")
                     time.sleep(wait_time)
                 else:
-                    raise LLMUnavailableError(f"LLM unavailable after {max_retries} retries: {err_msg}")
+                    raise LLMUnavailableError(f"LLM unavailable after {max_retries} retries ({quota_id}).")
             else:
                 return DecisionResult(
                     is_tool_call=False,
