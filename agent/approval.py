@@ -1,104 +1,147 @@
 """
 Approval Gate Module for InvoicePilot.
 Enforces human-in-the-loop approval before executing sensitive browser tool actions.
+Fail-Closed design: unknown element or match error = sensitive.
 """
 
+import re
 from typing import Dict, Any, List, Tuple, Optional
 from tools.browser import BrowserTools
+
+SENSITIVE_LABEL_REGEX = re.compile(r"\b(submit|record|save|confirm|pay|send|delete)\b", re.IGNORECASE)
 
 
 class ApprovalGate:
     """
     Evaluates tool execution requests against sensitive action policies.
-    Prompts human user for confirmation when a policy rule matches.
+    Enforces human approval before sensitive actions reach Playwright execution.
     """
 
-    def __init__(self, policies: List[Dict[str, str]], auto_approve: bool = False):
+    def __init__(self, auto_approve: bool = False):
         """
         Initialize ApprovalGate.
 
         Args:
-            policies: List of policy rule dictionaries, e.g.:
-                      [{'action': 'click', 'url_contains': 'localhost:8002', 'label_contains': 'Submit'}]
-            auto_approve: If True, automatically approves all sensitive actions without terminal prompts.
+            auto_approve: If True, skips terminal prompts (with startup warning).
         """
-        self.policies = policies
         self.auto_approve = auto_approve
 
-    def check_approval(
+    def is_sensitive(
         self,
-        browser: BrowserTools,
         tool_name: str,
-        tool_args: Dict[str, Any]
+        tool_args: Dict[str, Any],
+        current_url: str,
+        element_map: Dict[int, Dict[str, Any]]
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Determine sensitivity from last read_page snapshot state.
+
+        Sensitivity Rules:
+        1. Tool is 'click' and element is unknown/missing from element_map -> sensitive (Fail-Closed).
+        2. Element is input of type submit, or label matches submit|record|save|confirm|pay|send|delete -> sensitive.
+        3. URL host:port is localhost:8002 (finance system) and element is a button -> sensitive.
+        4. Programmatic form submit tools (if any) -> sensitive.
+
+        Returns:
+            (sensitive: bool, label: str, elem_info: dict)
+        """
+        if tool_name != "click":
+            # Non-click tools (e.g. goto, type_text, read_page, remember) are not sensitive
+            return False, "", {}
+
+        element_id = tool_args.get("element_id")
+        if element_id is None:
+            return True, "unknown element (no ID)", {}
+
+        # Rule C: Unknown element ID in snapshot -> Sensitive (Fail-Closed)
+        elem_info = element_map.get(int(element_id)) if element_map else None
+        if not elem_info:
+            return True, f"unknown element (ID {element_id} not in snapshot)", {}
+
+        el_type = str(elem_info.get("type", "")).lower()
+        el_label = str(elem_info.get("label", "")).strip()
+
+        # Rule A: Input of type submit OR label matches sensitive regex
+        is_submit_type = el_type == "input:submit" or el_type == "submit"
+        label_matches_sensitive = bool(SENSITIVE_LABEL_REGEX.search(el_label))
+
+        # Rule B: Current URL host:port is localhost:8002 and element is a button
+        is_finance_url = "localhost:8002" in current_url or ":8002" in current_url
+        is_button = el_type == "button" or el_type.startswith("input:")
+        finance_button = is_finance_url and is_button
+
+        if is_submit_type or label_matches_sensitive or finance_button:
+            return True, el_label, elem_info
+
+        return False, el_label, elem_info
+
+    def check_and_prompt(
+        self,
+        browser: Optional[BrowserTools],
+        tool_name: str,
+        tool_args: Dict[str, Any],
+        element_map: Dict[int, Dict[str, Any]]
     ) -> Tuple[bool, str]:
         """
-        Check if the tool execution matches a sensitive action policy.
-        If matched, requests terminal input from human operator unless auto_approve is set.
+        Single Choke Point check before execution.
+        Prints debug line for EVERY click and prompts if sensitive.
 
         Returns:
             (approved: bool, reason: str)
         """
-        if not self.policies:
-            return True, "No policies configured."
+        current_url = ""
+        if browser and hasattr(browser, "page") and browser.page:
+            try:
+                current_url = browser.page.url
+            except Exception:
+                current_url = ""
 
-        current_url = browser.page.url
-        matching_policy = None
+        element_id = tool_args.get("element_id")
 
-        if tool_name == "click":
-            element_id = tool_args.get("element_id")
-            # Locate element text/label to check policy condition
-            locator = browser.page.locator(f'[data-agent-id="{element_id}"]')
-            elem_text = ""
-            if locator.count() > 0:
-                elem_text = (locator.inner_text() or locator.get_attribute("value") or "").strip()
+        sensitive, label, elem_info = self.is_sensitive(
+            tool_name=tool_name,
+            tool_args=tool_args,
+            current_url=current_url,
+            element_map=element_map
+        )
 
-            for policy in self.policies:
-                p_action = policy.get("action", "")
-                p_url = policy.get("url_contains", "")
-                p_label = policy.get("label_contains", "")
+        if not sensitive:
+            if tool_name == "click":
+                print(f"[GATE] click element {element_id} label='{label}' url={current_url} sensitive=False -> skipped")
+            return True, "Non-sensitive action"
 
-                url_match = not p_url or p_url in current_url
-                label_match = not p_label or p_label.lower() in elem_text.lower()
-
-                if tool_name == p_action and url_match and label_match:
-                    matching_policy = policy
-                    break
-
-        if not matching_policy:
-            return True, "Action not flagged as sensitive."
-
-        # Sensitive action policy matched
+        # Action is sensitive
         if self.auto_approve:
-            print(f"\n[Approval Gate] Auto-approved sensitive action '{tool_name}' on {current_url}")
-            return True, "Auto-approved by CLI flag."
+            print(f"[GATE] click element {element_id} label='{label}' url={current_url} sensitive=True -> approved (auto-approve)")
+            return True, "Auto-approved by CLI flag"
 
-        # Extract current form field values for human summary
+        # Build boxed form summary for human operator
         form_summary = []
-        try:
-            inputs = browser.page.query_selector_all("input, select, textarea")
-            for inp in inputs:
-                inp_id = inp.get_attribute("id") or inp.get_attribute("name") or "field"
-                val = inp.input_value() if hasattr(inp, "input_value") else inp.get_attribute("value") or ""
-                if val:
+        if browser and hasattr(browser, "page") and browser.page:
+            try:
+                inputs = browser.page.query_selector_all("input, select, textarea")
+                for inp in inputs:
+                    inp_id = inp.get_attribute("id") or inp.get_attribute("name") or "field"
+                    val = inp.input_value() if hasattr(inp, "input_value") else inp.get_attribute("value") or ""
                     form_summary.append(f"  - {inp_id}: {val}")
-        except Exception:
-            pass
+            except Exception:
+                pass
 
-        form_text = "\n".join(form_summary) if form_summary else "  (No input values detected)"
+        form_text = "\n".join(form_summary) if form_summary else "  (No input fields found)"
 
         print("\n" + "=" * 60)
         print("          [APPROVAL GATE: SENSITIVE ACTION DETECTED]          ")
         print("=" * 60)
         print(f"Target URL : {current_url}")
-        print(f"Action     : {tool_name} (Element [{tool_args.get('element_id')}])")
-        print("Form Summary:")
+        print(f"Target     : [{element_id}] {elem_info.get('type', 'element')} \"{label}\"")
+        print("Current Form Values:")
         print(form_text)
         print("=" * 60)
 
-        response = input("Approve this action? [y/N]: ").strip().lower()
-        if response == "y":
-            print("[Approval Gate] Action APPROVED by human operator.\n")
-            return True, "Human approved action."
+        user_input = input("Approve this action? [y/N]: ").strip().lower()
+        if user_input in ["y", "yes"]:
+            print(f"[GATE] click element {element_id} label='{label}' url={current_url} sensitive=True -> approved")
+            return True, "Human approved action"
         else:
-            print("[Approval Gate] Action REJECTED by human operator.\n")
+            print(f"[GATE] click element {element_id} label='{label}' url={current_url} sensitive=True -> rejected")
             return False, "Human rejected this action"

@@ -3,7 +3,7 @@ Agent Core Execution Loop for InvoicePilot.
 Manages the step-by-step reasoning cycle:
 1. Build prompt context (Task goal + Remembered facts + Trimmed interaction history)
 2. Obtain LLM decision via llm.decide()
-3. Check sensitive action Approval Gate
+3. Check sensitive action Approval Gate at single choke point
 4. Execute selected tool through ToolRegistry
 5. Gate finish tool via independent Verifier check
 6. Log step action, generate Evidence Report, and save run JSON
@@ -34,17 +34,15 @@ class Agent:
         self,
         apps_config: List[Dict[str, str]],
         verifier_fn: Optional[Callable[[Dict[str, str]], Dict[str, Any]]] = None,
-        approval_policies: Optional[List[Dict[str, str]]] = None,
         auto_approve: bool = False,
         headless: bool = False,
         slow_mo: int = 300
     ):
         """
-        Initialize Agent with application config, verifiers, approval gate policies, and browser settings.
+        Initialize Agent with application config, verifiers, approval settings, and browser settings.
         """
         self.apps_config = apps_config
         self.verifier_fn = verifier_fn
-        self.approval_policies = approval_policies or []
         self.auto_approve = auto_approve
         self.headless = headless
         self.slow_mo = slow_mo
@@ -65,13 +63,18 @@ class Agent:
         print(f"\n==================== Starting Agent Loop ====================")
         print(f"Task: {task}")
         print(f"Max Steps: {max_steps}")
+        if self.auto_approve:
+            print("⚠️ WARNING: --auto-approve is ENABLED. All sensitive actions will execute without human confirmation!")
         print(f"============================================================\n")
 
         # Initialize browser tools, memory, registry, and approval gate
         browser = BrowserTools(headless=self.headless, slow_mo=self.slow_mo)
         memory = Memory()
         registry = ToolRegistry()
-        approval_gate = ApprovalGate(policies=self.approval_policies, auto_approve=self.auto_approve)
+        approval_gate = ApprovalGate(auto_approve=self.auto_approve)
+
+        # Map holding last read_page snapshot element metadata (element_id -> {type, label, href})
+        last_snapshot_elements: Dict[int, Dict[str, Any]] = {}
 
         # State flags for task completion and metrics
         finished = False
@@ -81,6 +84,28 @@ class Agent:
         tool_failures_count = 0
         human_approvals_count = 0
         verifier_result: Optional[Dict[str, Any]] = None
+
+        def wrapped_read_page() -> Dict[str, Any]:
+            nonlocal last_snapshot_elements
+            res = browser.read_page()
+            # Extract and store elements map from DOM read_page result
+            if res.get("ok") and "observation" in res:
+                # Re-parse or fetch elements array via internal evaluate for state map
+                try:
+                    raw_data = browser.page.evaluate("""
+                    () => {
+                        const candidates = Array.from(document.querySelectorAll('[data-agent-id]'));
+                        return candidates.map(el => ({
+                            id: parseInt(el.getAttribute('data-agent-id')),
+                            type: el.tagName.toLowerCase() === 'input' ? `input:${el.type || 'text'}` : el.tagName.toLowerCase(),
+                            label: (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('placeholder') || '').trim()
+                        }));
+                    }
+                    """)
+                    last_snapshot_elements = {el["id"]: el for el in raw_data if "id" in el}
+                except Exception:
+                    pass
+            return res
 
         def finish_impl(summary: str) -> Dict[str, Any]:
             nonlocal finished, final_summary, run_status, rejected_finish_attempts, verifier_result
@@ -137,7 +162,7 @@ class Agent:
             "type": "OBJECT", "properties": {"url": {"type": "STRING"}}, "required": ["url"]
         })
 
-        registry.register("read_page", browser.read_page, "Inspect DOM state and return visible text and tagged elements.", {
+        registry.register("read_page", wrapped_read_page, "Inspect DOM state and return visible text and tagged elements.", {
             "type": "OBJECT", "properties": {}
         })
 
@@ -222,8 +247,14 @@ class Agent:
                     tool_args = decision.tool_args
                     print(f"Action: {tool_name}({tool_args})")
 
-                    # Check Approval Gate before executing action
-                    approved, app_reason = approval_gate.check_approval(browser, tool_name, tool_args)
+                    # SINGLE CHOKE POINT: Check Approval Gate before executing action
+                    approved, app_reason = approval_gate.check_and_prompt(
+                        browser=browser,
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                        element_map=last_snapshot_elements
+                    )
+
                     if not approved:
                         result = {
                             "ok": False,
@@ -263,14 +294,12 @@ class Agent:
                 run_status = "MAX_STEPS"
                 final_summary = f"Reached maximum steps ({max_steps}) without completion."
 
-            # Run verifier check at run end if not already evaluated
             if self.verifier_fn and not verifier_result:
                 verifier_result = self.verifier_fn(memory.facts)
 
         finally:
             elapsed_sec = time.time() - start_time
             
-            # Save final full-page screenshot
             os.makedirs("screenshots", exist_ok=True)
             screenshot_path = os.path.join("screenshots", f"final_run_{timestamp_str}.png")
             try:
@@ -280,7 +309,6 @@ class Agent:
 
             browser.close()
 
-            # Format Evidence Report Terminal Output
             rec_id = verifier_result.get("record_id") if verifier_result else "N/A"
             checks = verifier_result.get("checks", []) if verifier_result else []
 
@@ -314,7 +342,6 @@ class Agent:
 
             print("=" * 65 + "\n")
 
-            # Save Evidence Report & Action Log JSON to runs/ folder
             os.makedirs("runs", exist_ok=True)
             report_data = {
                 "timestamp": timestamp_str,
