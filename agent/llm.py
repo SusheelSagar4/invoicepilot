@@ -5,6 +5,7 @@ with the LLM provider (Google Gemini API).
 """
 
 import os
+import re
 import time
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -31,8 +32,17 @@ if not API_KEY:
 # Model configuration constant (Single source of truth)
 MODEL_NAME = "gemini-3.5-flash"
 
+# Minimum delay in seconds between consecutive API calls to comply with rate limits (5 RPM free tier)
+MIN_SECONDS_BETWEEN_CALLS = 13
+_last_call_timestamp: float = 0.0
+
 # Initialize Google GenAI client
 _client = genai.Client(api_key=API_KEY)
+
+
+class LLMUnavailableError(Exception):
+    """Raised when the LLM provider remains unavailable after maximum rate-limit retries."""
+    pass
 
 
 @dataclass
@@ -48,9 +58,44 @@ class DecisionResult:
     error: Optional[str] = None
 
 
+def _enforce_min_delay():
+    """
+    Ensure API requests are spaced at least MIN_SECONDS_BETWEEN_CALLS seconds apart.
+    """
+    global _last_call_timestamp
+    now = time.time()
+    elapsed = now - _last_call_timestamp
+    if _last_call_timestamp > 0 and elapsed < MIN_SECONDS_BETWEEN_CALLS:
+        sleep_needed = MIN_SECONDS_BETWEEN_CALLS - elapsed
+        time.sleep(sleep_needed)
+    _last_call_timestamp = time.time()
+
+
+def _extract_retry_delay(err: Exception) -> int:
+    """
+    Extract suggested retry delay in seconds from Gemini API error payload/details.
+    Defaults to 60 seconds if not specified.
+    """
+    err_str = str(err)
+    match = re.search(r"['\"]?retryDelay['\"]?\s*:\s*['\"]?(\d+)s?['\"]?", err_str, re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+    
+    details = getattr(err, "details", None)
+    if details and isinstance(details, (list, tuple)):
+        for d in details:
+            if isinstance(d, dict) and "retryDelay" in d:
+                delay_str = str(d["retryDelay"]).rstrip("s")
+                if delay_str.isdigit():
+                    return int(delay_str)
+
+    return 60
+
+
 def ask(prompt: str) -> str:
     """
     Sends a plain text prompt to the Gemini LLM and returns the generated text response.
+    Respects MIN_SECONDS_BETWEEN_CALLS and retries on 429 quota errors.
 
     Args:
         prompt: Plain text prompt string.
@@ -58,11 +103,27 @@ def ask(prompt: str) -> str:
     Returns:
         Generated text reply from the model as a string.
     """
-    response = _client.models.generate_content(
-        model=MODEL_NAME,
-        contents=prompt
-    )
-    return response.text.strip() if response.text else ""
+    max_retries = 5
+    for attempt in range(max_retries):
+        _enforce_min_delay()
+        try:
+            response = _client.models.generate_content(
+                model=MODEL_NAME,
+                contents=prompt
+            )
+            return response.text.strip() if response.text else ""
+        except Exception as e:
+            err_msg = str(e)
+            is_rate_limit = "429" in err_msg or "quota" in err_msg.lower() or "resource_exhausted" in err_msg.lower()
+            if is_rate_limit and attempt < max_retries - 1:
+                suggested_delay = _extract_retry_delay(e)
+                wait_time = suggested_delay + 1
+                print(f"Rate limited, waiting {wait_time}s...")
+                time.sleep(wait_time)
+            else:
+                raise LLMUnavailableError(f"LLM ask() failed: {err_msg}")
+
+    raise LLMUnavailableError("LLM unavailable after maximum retries.")
 
 
 def decide(
@@ -75,9 +136,9 @@ def decide(
     Sends conversation history and registered tool schemas to Gemini,
     returning a structured DecisionResult with a tool call or text response.
 
-    Implements automatic retry logic (up to 3 attempts) for HTTP 429 / quota rate-limit errors.
+    Enforces MIN_SECONDS_BETWEEN_CALLS and handles 429 rate limits up to 5 retries.
+    Raises LLMUnavailableError if all retries fail.
     """
-    # Build FunctionDeclarations from tool schemas
     func_declarations = []
     for tool_schema in tools:
         func_declarations.append(
@@ -90,14 +151,12 @@ def decide(
 
     tool_config = [types.Tool(function_declarations=func_declarations)] if func_declarations else None
 
-    # Construct generation config with system prompt and tools
     config = types.GenerateContentConfig(
         system_instruction=system_prompt,
         tools=tool_config,
         temperature=0.0
     )
 
-    # Format message history into SDK Content items
     contents = []
     for msg in messages:
         role = "user" if msg.get("role") == "user" else "model"
@@ -108,9 +167,9 @@ def decide(
             )
         )
 
-    # Retry loop for 429 / quota errors
-    max_retries = 3
+    max_retries = 5
     for attempt in range(max_retries):
+        _enforce_min_delay()
         try:
             response = _client.models.generate_content(
                 model=MODEL_NAME,
@@ -118,7 +177,6 @@ def decide(
                 config=config
             )
 
-            # Check if model returned function calls
             if response.function_calls:
                 call = response.function_calls[0]
                 tool_args = dict(call.args) if call.args else {}
@@ -128,7 +186,6 @@ def decide(
                     tool_args=tool_args
                 )
 
-            # Fallback to plain text response
             text_res = response.text.strip() if response.text else ""
             return DecisionResult(
                 is_tool_call=False,
@@ -137,15 +194,19 @@ def decide(
 
         except Exception as e:
             err_msg = str(e)
-            is_rate_limit = "429" in err_msg or "quota" in err_msg.lower() or "resource" in err_msg.lower()
-            if is_rate_limit and attempt < max_retries - 1:
-                wait_time = 2 * (attempt + 1)
-                print(f"[llm.decide] Rate limit / quota error encountered. Retrying in {wait_time}s... (Attempt {attempt + 1}/{max_retries})")
-                time.sleep(wait_time)
+            is_rate_limit = "429" in err_msg or "quota" in err_msg.lower() or "resource_exhausted" in err_msg.lower()
+            if is_rate_limit:
+                if attempt < max_retries - 1:
+                    suggested_delay = _extract_retry_delay(e)
+                    wait_time = suggested_delay + 1
+                    print(f"Rate limited, waiting {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    raise LLMUnavailableError(f"LLM unavailable after {max_retries} retries: {err_msg}")
             else:
                 return DecisionResult(
                     is_tool_call=False,
                     error=f"LLM decision error: {err_msg}"
                 )
 
-    return DecisionResult(is_tool_call=False, error="LLM call failed after maximum retries.")
+    raise LLMUnavailableError(f"LLM unavailable after {max_retries} retries.")

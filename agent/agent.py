@@ -9,6 +9,7 @@ Manages the step-by-step reasoning cycle:
 """
 
 import sys
+import time
 from typing import List, Dict, Any, Optional
 from tools.browser import BrowserTools
 from agent.memory import Memory
@@ -42,6 +43,7 @@ class Agent:
         Returns:
             Dict containing {'success': bool, 'summary': str, 'steps': int, 'memory_facts': dict}
         """
+        start_time = time.time()
         print(f"\n==================== Starting Agent Loop ====================")
         print(f"Task: {task}")
         print(f"Max Steps: {max_steps}")
@@ -180,11 +182,20 @@ class Agent:
 
                 # Call LLM decision engine
                 tool_schemas = registry.get_schemas()
-                decision = llm.decide(
-                    system_prompt=system_prompt,
-                    messages=messages,
-                    tools=tool_schemas
-                )
+                try:
+                    decision = llm.decide(
+                        system_prompt=system_prompt,
+                        messages=messages,
+                        tools=tool_schemas
+                    )
+                except llm.LLMUnavailableError as e:
+                    print(f"\nStopped: LLM unavailable after retries ({str(e)})")
+                    return {
+                        "success": False,
+                        "summary": "Stopped: LLM unavailable after retries",
+                        "steps": step - 1,
+                        "memory_facts": memory.facts
+                    }
 
                 if decision.error:
                     print(f"LLM Error: {decision.error}")
@@ -252,5 +263,7 @@ class Agent:
             }
 
         finally:
+            elapsed_time = time.time() - start_time
+            print(f"Total Elapsed Time: {elapsed_time:.2f} seconds")
             # Always ensure browser resources are cleanly closed
             browser.close()
